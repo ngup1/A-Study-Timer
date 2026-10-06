@@ -1,6 +1,7 @@
 import AppKit
 import ServiceManagement
 import SwiftUI
+import UserNotifications
 
 // MARK: - Model
 
@@ -10,6 +11,20 @@ enum Mode: String, CaseIterable, Identifiable {
 }
 
 enum RunState { case idle, running, paused }
+
+enum SoundMode: String, CaseIterable, Identifiable {
+    case off = "OFF", chime = "CHIME", alarm = "ALARM"
+    var id: String { rawValue }
+}
+
+/// Settings live in UserDefaults so both the views (@AppStorage) and the model can read them.
+enum Settings {
+    static let tones = ["Glass", "Ping", "Hero", "Submarine", "Funk", "Purr", "Blow",
+                        "Bottle", "Frog", "Morse", "Pop", "Sosumi", "Tink", "Basso"]
+    static var notify: Bool { UserDefaults.standard.bool(forKey: "notify") }
+    static var sound: SoundMode { SoundMode(rawValue: UserDefaults.standard.string(forKey: "sound") ?? "") ?? .chime }
+    static var tone: NSSound? { NSSound(named: UserDefaults.standard.string(forKey: "tone") ?? "Glass") }
+}
 
 enum Phase {
     case focus, shortBreak, longBreak
@@ -26,6 +41,7 @@ final class TimerModel: ObservableObject {
     @Published var mode: Mode = .timer { didSet { if oldValue != mode { reset() } } }
     @Published private(set) var state: RunState = .idle
     @Published private(set) var finished = false
+    @Published private(set) var ringing = false
 
     // Countdown length
     @Published var cdH = 0 { didSet { changed() } }
@@ -51,6 +67,7 @@ final class TimerModel: ObservableObject {
     private var startedAt: Date?
     private var ticker: Timer?
     private var lastShown = -1
+    private var alarm: Timer?
 
     var elapsed: TimeInterval {
         accumulated + (startedAt.map { Date().timeIntervalSince($0) } ?? 0)
@@ -88,7 +105,10 @@ final class TimerModel: ObservableObject {
 
     // MARK: Controls
 
-    func toggle() { state == .running ? pause() : start() }
+    func toggle() {
+        stopAlarm()
+        state == .running ? pause() : start()
+    }
 
     func start() {
         if finished { accumulated = 0; finished = false }
@@ -111,6 +131,7 @@ final class TimerModel: ObservableObject {
     }
 
     func reset() {
+        stopAlarm()
         ticker?.invalidate(); ticker = nil
         accumulated = 0
         startedAt = nil
@@ -123,6 +144,7 @@ final class TimerModel: ObservableObject {
 
     func skipPhase() {
         guard mode == .pomodoro else { return }
+        stopAlarm()
         advancePhase()
     }
 
@@ -145,18 +167,59 @@ final class TimerModel: ObservableObject {
         }
     }
 
+    func stopAlarm() {
+        alarm?.invalidate(); alarm = nil
+        if ringing { ringing = false }
+    }
+
     private func complete(target t: TimeInterval) {
-        NSSound(named: "Glass")?.play()
         if mode == .pomodoro {
             advancePhase()
+            switch phase {
+            case .focus: alert("Break's over", "Time to focus.")
+            case .shortBreak: alert("Focus session done", "Take a short break.")
+            case .longBreak: alert("Focus session done", "Take a long break.")
+            }
             return
         }
+        alert(mode == .timer ? "Time's up" : "Stopwatch done",
+              mode == .timer ? "Your \(Self.format(Int(t))) timer has finished." : "Reached \(Self.format(Int(t))).")
         ticker?.invalidate(); ticker = nil
         accumulated = t
         startedAt = nil
         state = .idle
         finished = true
         tick(force: true)
+    }
+
+    private func alert(_ title: String, _ body: String) {
+        if Settings.notify {
+            let c = UNMutableNotificationContent()
+            c.title = title
+            c.body = body
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
+        }
+        guard let tone = Settings.tone else { return }
+        switch Settings.sound {
+        case .off: break
+        case .chime: tone.play()
+        case .alarm: ring(tone)
+        }
+    }
+
+    /// Repeats the tone until dismissed, giving up after a minute.
+    private func ring(_ tone: NSSound) {
+        stopAlarm()
+        ringing = true
+        let started = Date()
+        tone.play()
+        let t = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
+            if Date().timeIntervalSince(started) > 60 { self?.stopAlarm(); return }
+            tone.stop()
+            tone.play()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        alarm = t
     }
 
     private func advancePhase() {
@@ -241,14 +304,19 @@ struct ContentView: View {
     @ObservedObject var model: TimerModel
     var close: () -> Void
     @AppStorage("digitColor") private var digitColor = "red"
+    @State private var showSettings = false
 
     private var p: Palette { digitColor == "red" ? .red : .black }
 
     var body: some View {
         VStack(spacing: 12) {
             header
-            face
-            controls
+            if showSettings {
+                SettingsView(palette: p)
+            } else {
+                face
+                controls
+            }
         }
         .padding(14)
         .frame(width: 320)
@@ -259,7 +327,7 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
     }
 
-    // Close · mode tabs · colour dots
+    // Close · mode tabs · settings
     private var header: some View {
         HStack(spacing: 10) {
             Button(action: close) {
@@ -273,35 +341,36 @@ struct ContentView: View {
 
             Spacer(minLength: 0)
 
-            ForEach(Mode.allCases) { m in
-                Button { model.mode = m } label: {
-                    Text(m.rawValue)
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                        .tracking(0.8)
-                        .foregroundColor(model.mode == m ? p.accent : dim)
+            if showSettings {
+                Text("SETTINGS")
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundColor(p.accent)
+            } else {
+                ForEach(Mode.allCases) { m in
+                    Button { model.mode = m } label: {
+                        Text(m.rawValue)
+                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                            .tracking(0.8)
+                            .foregroundColor(model.mode == m ? p.accent : dim)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.state != .idle)
+                    .opacity(model.state != .idle && model.mode != m ? 0.35 : 1)
                 }
-                .buttonStyle(.plain)
-                .disabled(model.state != .idle)
-                .opacity(model.state != .idle && model.mode != m ? 0.35 : 1)
             }
 
             Spacer(minLength: 0)
 
-            HStack(spacing: 5) {
-                colorDot("red", Palette.red.digits)
-                colorDot("black", Color(white: 0.95))
+            Button { showSettings.toggle() } label: {
+                Image(systemName: showSettings ? "checkmark" : "gearshape.fill").font(.system(size: 10, weight: .bold))
+                    .foregroundColor(showSettings ? p.accent : dim)
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(control))
             }
+            .buttonStyle(.plain)
+            .help(showSettings ? "Done" : "Settings")
         }
-    }
-
-    private func colorDot(_ name: String, _ c: Color) -> some View {
-        Button { digitColor = name } label: {
-            Circle().fill(c)
-                .frame(width: 12, height: 12)
-                .overlay(Circle().stroke(Color.white.opacity(digitColor == name ? 0.8 : 0.2), lineWidth: 1.5))
-        }
-        .buttonStyle(.plain)
-        .help(name == "red" ? "Red digits" : "White digits")
     }
 
     private var face: some View {
@@ -371,6 +440,12 @@ struct ContentView: View {
             .keyboardShortcut(.space, modifiers: [])
             .help(model.state == .running ? "Pause (Space)" : "Start (Space)")
 
+            if model.ringing {
+                Button(action: model.stopAlarm) { Image(systemName: "bell.slash.fill") }
+                    .buttonStyle(Big(accent: p.accent, primary: true))
+                    .help("Stop alarm")
+            }
+
             if model.mode == .pomodoro && model.state != .idle {
                 Button(action: model.skipPhase) { Image(systemName: "forward.end.fill") }
                     .buttonStyle(Big(accent: p.accent, primary: false))
@@ -380,6 +455,144 @@ struct ContentView: View {
             Button(action: model.reset) { Image(systemName: "arrow.counterclockwise") }
                 .buttonStyle(Big(accent: p.accent, primary: true))
                 .help("Reset")
+        }
+    }
+}
+
+struct SettingsView: View {
+    let palette: Palette
+    @AppStorage("digitColor") private var digitColor = "red"
+    @AppStorage("notify") private var notify = false
+    @AppStorage("sound") private var sound = SoundMode.chime.rawValue
+    @AppStorage("tone") private var tone = "Glass"
+    @State private var denied = false
+    @State private var launchAtLogin = Settings.launchAtLogin
+
+    var body: some View {
+        VStack(spacing: 0) {
+            row("DIGITS") {
+                HStack(spacing: 6) {
+                    colorDot("red", Palette.red.digits)
+                    colorDot("black", Color(white: 0.95))
+                }
+            }
+            divider
+            row("OPEN AT LOGIN") {
+                chips(["OFF", "ON"], selected: launchAtLogin ? "ON" : "OFF") { o in
+                    if (o == "ON") != launchAtLogin { Settings.toggleLaunchAtLogin() }
+                    launchAtLogin = Settings.launchAtLogin
+                }
+            }
+            divider
+            row("NOTIFY") {
+                chips(["OFF", "ON"], selected: notify ? "ON" : "OFF") { setNotify($0 == "ON") }
+            }
+            if denied {
+                Button {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.notifications")!)
+                } label: {
+                    Text("BLOCKED · ALLOW IN SYSTEM SETTINGS")
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .foregroundColor(palette.accent.opacity(0.8))
+                        .underline()
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 8)
+            }
+            divider
+            row("SOUND") {
+                chips(SoundMode.allCases.map(\.rawValue), selected: sound) { sound = $0; preview() }
+            }
+            divider
+            row("TONE") {
+                Menu {
+                    ForEach(Settings.tones, id: \.self) { t in
+                        Button(t) { tone = t; preview() }
+                    }
+                } label: {
+                    Text(tone.uppercased())
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundColor(palette.accent)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.visible)
+                .fixedSize()
+            }
+            .disabled(sound == SoundMode.off.rawValue)
+            .opacity(sound == SoundMode.off.rawValue ? 0.35 : 1)
+        }
+        .padding(.horizontal, 12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(palette.face))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.06), lineWidth: 1))
+        .onAppear {
+            launchAtLogin = Settings.launchAtLogin
+            checkAuthorization()
+        }
+    }
+
+    private var divider: some View { Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1) }
+
+    private func row<C: View>(_ label: String, @ViewBuilder _ content: () -> C) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                .tracking(1.5)
+                .foregroundColor(dim)
+            Spacer()
+            content()
+        }
+        .frame(height: 34)
+    }
+
+    private func chips(_ options: [String], selected: String, _ pick: @escaping (String) -> Void) -> some View {
+        HStack(spacing: 10) {
+            ForEach(options, id: \.self) { o in
+                Button { pick(o) } label: {
+                    Text(o)
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundColor(o == selected ? palette.accent : dim)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func colorDot(_ name: String, _ c: Color) -> some View {
+        Button { digitColor = name } label: {
+            Circle().fill(c)
+                .frame(width: 12, height: 12)
+                .overlay(Circle().stroke(Color.white.opacity(digitColor == name ? 0.8 : 0.2), lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)
+        .help(name == "red" ? "Red digits" : "White digits")
+    }
+
+    private func preview() {
+        guard sound != SoundMode.off.rawValue, let t = Settings.tone else { return }
+        t.stop()
+        t.play()
+    }
+
+    private func setNotify(_ on: Bool) {
+        guard on else { notify = false; denied = false; return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { ok, _ in
+            DispatchQueue.main.async {
+                notify = ok
+                denied = !ok
+            }
+        }
+    }
+
+    /// Turn the toggle back off if permission was revoked in System Settings.
+    private func checkAuthorization() {
+        guard notify else { return }
+        UNUserNotificationCenter.current().getNotificationSettings { s in
+            let ok = s.authorizationStatus == .authorized || s.authorizationStatus == .provisional
+            DispatchQueue.main.async {
+                if !ok { notify = false; denied = true }
+            }
         }
     }
 }
@@ -572,6 +785,7 @@ struct Big: ButtonStyle {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
+        UNUserNotificationCenter.current().delegate = self
         panel = TimerPanel(model: model)
         panel.onClose = { [weak self] in self?.hidePanel() }
         model.onChange = { [weak self] in self?.updateStatus() }
@@ -634,7 +848,13 @@ struct Big: ButtonStyle {
         }
     }
 
-    @objc func toggleLaunchAtLogin() {
+    @objc func toggleLaunchAtLogin() { Settings.toggleLaunchAtLogin() }
+}
+
+extension Settings {
+    static var launchAtLogin: Bool { SMAppService.mainApp.status == .enabled }
+
+    static func toggleLaunchAtLogin() {
         let service = SMAppService.mainApp
         do {
             if service.status == .enabled {
@@ -650,12 +870,16 @@ struct Big: ButtonStyle {
         }
         if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
     }
+}
+
+extension AppDelegate {
 
     @objc func togglePanel() {
         panel.isVisible ? hidePanel() : showPanel()
     }
 
     func showPanel() {
+        model.stopAlarm()
         if !positioned, let screen = NSScreen.main {
             panel.layoutIfNeeded()
             let size = panel.frame.size
@@ -671,6 +895,20 @@ struct Big: ButtonStyle {
     func hidePanel() {
         panel.orderOut(nil)
         updateStatus()
+    }
+}
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    // Show banners even though the app counts as frontmost while the panel is up.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                            withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list])
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                            withCompletionHandler completionHandler: @escaping () -> Void) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.showPanel() } }
+        completionHandler()
     }
 }
 
