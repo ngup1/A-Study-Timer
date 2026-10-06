@@ -17,13 +17,38 @@ enum SoundMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Settings live in UserDefaults so both the views (@AppStorage) and the model can read them.
+/// Saved settings, read from UserDefaults by the views (@AppStorage) and the model.
 enum Settings {
     static let tones = ["Glass", "Ping", "Hero", "Submarine", "Funk", "Purr", "Blow",
                         "Bottle", "Frog", "Morse", "Pop", "Sosumi", "Tink", "Basso"]
     static var notify: Bool { UserDefaults.standard.bool(forKey: "notify") }
     static var sound: SoundMode { SoundMode(rawValue: UserDefaults.standard.string(forKey: "sound") ?? "") ?? .chime }
     static var tone: NSSound? { NSSound(named: UserDefaults.standard.string(forKey: "tone") ?? "Glass") }
+}
+
+/// Edits made in the settings screen; nothing takes effect until `apply()`.
+struct SettingsDraft {
+    var color: String
+    var notify: Bool
+    var sound: SoundMode
+    var tone: String
+    var launchAtLogin: Bool
+
+    static var current: SettingsDraft {
+        let d = UserDefaults.standard
+        return SettingsDraft(color: d.string(forKey: "digitColor") ?? "red", notify: Settings.notify,
+                             sound: Settings.sound, tone: d.string(forKey: "tone") ?? "Glass",
+                             launchAtLogin: Settings.launchAtLogin)
+    }
+
+    func apply() {
+        let d = UserDefaults.standard
+        d.set(color, forKey: "digitColor")
+        d.set(notify, forKey: "notify")
+        d.set(sound.rawValue, forKey: "sound")
+        d.set(tone, forKey: "tone")
+        if launchAtLogin != Settings.launchAtLogin { Settings.toggleLaunchAtLogin() }
+    }
 }
 
 enum Phase {
@@ -45,7 +70,7 @@ final class TimerModel: ObservableObject {
 
     // Countdown length
     @Published var cdH = 0 { didSet { changed() } }
-    @Published var cdM = 25 { didSet { changed() } }
+    @Published var cdM = 0 { didSet { changed() } }
     @Published var cdS = 0 { didSet { changed() } }
 
     // Stopwatch optional stop point (0 = unlimited)
@@ -304,15 +329,16 @@ struct ContentView: View {
     @ObservedObject var model: TimerModel
     var close: () -> Void
     @AppStorage("digitColor") private var digitColor = "red"
+    @State private var draft = SettingsDraft.current
     @State private var showSettings = false
 
-    private var p: Palette { digitColor == "red" ? .red : .black }
+    private var p: Palette { (showSettings ? draft.color : digitColor) == "red" ? .red : .black }
 
     var body: some View {
         VStack(spacing: 12) {
             header
             if showSettings {
-                SettingsView(palette: p)
+                SettingsView(draft: $draft, palette: p)
             } else {
                 face
                 controls
@@ -362,14 +388,17 @@ struct ContentView: View {
 
             Spacer(minLength: 0)
 
-            Button { showSettings.toggle() } label: {
+            Button {
+                if showSettings { draft.apply() } else { draft = .current }
+                showSettings.toggle()
+            } label: {
                 Image(systemName: showSettings ? "checkmark" : "gearshape.fill").font(.system(size: 10, weight: .bold))
                     .foregroundColor(showSettings ? p.accent : dim)
                     .frame(width: 20, height: 20)
                     .background(Circle().fill(control))
             }
             .buttonStyle(.plain)
-            .help(showSettings ? "Done" : "Settings")
+            .help(showSettings ? "Save" : "Settings")
         }
     }
 
@@ -460,13 +489,9 @@ struct ContentView: View {
 }
 
 struct SettingsView: View {
+    @Binding var draft: SettingsDraft
     let palette: Palette
-    @AppStorage("digitColor") private var digitColor = "red"
-    @AppStorage("notify") private var notify = false
-    @AppStorage("sound") private var sound = SoundMode.chime.rawValue
-    @AppStorage("tone") private var tone = "Glass"
     @State private var denied = false
-    @State private var launchAtLogin = Settings.launchAtLogin
 
     var body: some View {
         VStack(spacing: 0) {
@@ -478,14 +503,11 @@ struct SettingsView: View {
             }
             divider
             row("OPEN AT LOGIN") {
-                chips(["OFF", "ON"], selected: launchAtLogin ? "ON" : "OFF") { o in
-                    if (o == "ON") != launchAtLogin { Settings.toggleLaunchAtLogin() }
-                    launchAtLogin = Settings.launchAtLogin
-                }
+                chips(["OFF", "ON"], selected: draft.launchAtLogin ? "ON" : "OFF") { draft.launchAtLogin = $0 == "ON" }
             }
             divider
             row("NOTIFY") {
-                chips(["OFF", "ON"], selected: notify ? "ON" : "OFF") { setNotify($0 == "ON") }
+                chips(["OFF", "ON"], selected: draft.notify ? "ON" : "OFF") { setNotify($0 == "ON") }
             }
             if denied {
                 Button {
@@ -501,16 +523,19 @@ struct SettingsView: View {
             }
             divider
             row("SOUND") {
-                chips(SoundMode.allCases.map(\.rawValue), selected: sound) { sound = $0; preview() }
+                chips(SoundMode.allCases.map(\.rawValue), selected: draft.sound.rawValue) {
+                    draft.sound = SoundMode(rawValue: $0) ?? .chime
+                    preview()
+                }
             }
             divider
             row("TONE") {
                 Menu {
                     ForEach(Settings.tones, id: \.self) { t in
-                        Button(t) { tone = t; preview() }
+                        Button(t) { draft.tone = t; preview() }
                     }
                 } label: {
-                    Text(tone.uppercased())
+                    Text(draft.tone.uppercased())
                         .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                         .tracking(0.8)
                         .foregroundColor(palette.accent)
@@ -519,16 +544,13 @@ struct SettingsView: View {
                 .menuIndicator(.visible)
                 .fixedSize()
             }
-            .disabled(sound == SoundMode.off.rawValue)
-            .opacity(sound == SoundMode.off.rawValue ? 0.35 : 1)
+            .disabled(draft.sound == .off)
+            .opacity(draft.sound == .off ? 0.35 : 1)
         }
         .padding(.horizontal, 12)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(palette.face))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.06), lineWidth: 1))
-        .onAppear {
-            launchAtLogin = Settings.launchAtLogin
-            checkAuthorization()
-        }
+        .onAppear(perform: checkAuthorization)
     }
 
     private var divider: some View { Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1) }
@@ -560,26 +582,26 @@ struct SettingsView: View {
     }
 
     private func colorDot(_ name: String, _ c: Color) -> some View {
-        Button { digitColor = name } label: {
+        Button { draft.color = name } label: {
             Circle().fill(c)
                 .frame(width: 12, height: 12)
-                .overlay(Circle().stroke(Color.white.opacity(digitColor == name ? 0.8 : 0.2), lineWidth: 1.5))
+                .overlay(Circle().stroke(Color.white.opacity(draft.color == name ? 0.8 : 0.2), lineWidth: 1.5))
         }
         .buttonStyle(.plain)
         .help(name == "red" ? "Red digits" : "White digits")
     }
 
     private func preview() {
-        guard sound != SoundMode.off.rawValue, let t = Settings.tone else { return }
+        guard draft.sound != .off, let t = NSSound(named: draft.tone) else { return }
         t.stop()
         t.play()
     }
 
     private func setNotify(_ on: Bool) {
-        guard on else { notify = false; denied = false; return }
+        guard on else { draft.notify = false; denied = false; return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { ok, _ in
             DispatchQueue.main.async {
-                notify = ok
+                draft.notify = ok
                 denied = !ok
             }
         }
@@ -587,11 +609,11 @@ struct SettingsView: View {
 
     /// Turn the toggle back off if permission was revoked in System Settings.
     private func checkAuthorization() {
-        guard notify else { return }
+        guard draft.notify else { return }
         UNUserNotificationCenter.current().getNotificationSettings { s in
             let ok = s.authorizationStatus == .authorized || s.authorizationStatus == .provisional
             DispatchQueue.main.async {
-                if !ok { notify = false; denied = true }
+                if !ok { draft.notify = false; denied = true }
             }
         }
     }
