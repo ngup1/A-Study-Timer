@@ -470,7 +470,7 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            row("DIGITS") {
+            row("COLOR") {
                 HStack(spacing: 6) {
                     colorDot("red", Palette.red.digits)
                     colorDot("black", Color(white: 0.95))
