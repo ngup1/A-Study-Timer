@@ -1,6 +1,6 @@
-# Study Timer
+# A Study Timer
 
-A minimal macOS menu-bar timer with a seven-segment display. Timer, Pomodoro and Stopwatch modes.
+I got an alarm clock recently and I like how it looks and YouTube ads are annoying so I built a minimal macOS menu-bar timer with a seven-segment display. Timer, Pomodoro and Stopwatch modes.
 
 Requires macOS 13+ on Apple Silicon.
 
